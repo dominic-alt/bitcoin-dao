@@ -297,3 +297,102 @@
     )
   )
 )
+
+;; Execute a proposal after voting period expires
+(define-public (execute-proposal (proposal-id uint))
+  (let (
+    (caller tx-sender)
+  )
+    (asserts! (is-member caller) ERR-NOT-MEMBER)
+    (asserts! (is-valid-proposal-id proposal-id) ERR-INVALID-PROPOSAL)
+    
+    (match (map-get? proposals proposal-id)
+      proposal 
+      (begin
+        (asserts! (>= stacks-block-height (get expires-at proposal)) ERR-PROPOSAL-EXPIRED)
+        (asserts! (is-eq (get status proposal) "active") ERR-INVALID-PROPOSAL)
+        
+        (let (
+          (yes-votes (get yes-votes proposal))
+          (no-votes (get no-votes proposal))
+          (amount (get amount proposal))
+        )
+          (if (> yes-votes no-votes)
+            (begin
+              (try! (as-contract (stx-transfer? amount tx-sender (get creator proposal))))
+              (var-set treasury-balance (- (var-get treasury-balance) amount))
+              (asserts! (is-valid-proposal-id proposal-id) ERR-INVALID-PROPOSAL)
+              (map-set proposals proposal-id (merge proposal {status: "executed"}))
+              (try! (update-member-reputation (get creator proposal) 5))
+              (ok true)
+            )
+            (begin
+              (asserts! (is-valid-proposal-id proposal-id) ERR-INVALID-PROPOSAL)
+              (map-set proposals proposal-id (merge proposal {status: "rejected"}))
+              (ok false)
+            )
+          )
+        )
+      )
+      ERR-INVALID-PROPOSAL
+    )
+  )
+)
+
+;; TREASURY MANAGEMENT
+
+;; Get current treasury balance
+(define-read-only (get-treasury-balance)
+  (ok (var-get treasury-balance))
+)
+
+;; Donate funds to the DAO treasury
+(define-public (donate-to-treasury (amount uint))
+  (let (
+    (caller tx-sender)
+  )
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (try! (stx-transfer? amount caller (as-contract tx-sender)))
+    (var-set treasury-balance (+ (var-get treasury-balance) amount))
+    
+    (if (is-member caller)
+      (begin
+        (try! (update-member-reputation caller 2))
+        (ok true)
+      )
+      (ok true)
+    )
+  )
+)
+
+;; REPUTATION SYSTEM
+
+;; Get a member's current reputation score
+(define-read-only (get-member-reputation (user principal))
+  (match (map-get? members user)
+    member-data (ok (get reputation member-data))
+    ERR-NOT-MEMBER
+  )
+)
+
+;; Decay reputation for inactive members (Owner only)
+(define-public (decay-inactive-members)
+  (let (
+    (caller tx-sender)
+    (current-block stacks-block-height)
+  )
+    (asserts! (is-eq caller CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    
+    (map-set members caller
+      (match (map-get? members caller)
+        member-data 
+        (if (> (- current-block (get last-interaction member-data)) u4320) ;; 30 days
+          (merge member-data {reputation: (/ (get reputation member-data) u2)})
+          member-data
+        )
+        { reputation: u0, stake: u0, last-interaction: current-block }
+      )
+    )
+    (ok true)
+  )
+)
