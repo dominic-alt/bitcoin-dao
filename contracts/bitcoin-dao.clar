@@ -204,3 +204,96 @@
     )
   )
 )
+
+;; Unstake tokens and reduce governance weight
+(define-public (unstake-tokens (amount uint))
+  (let (
+    (caller tx-sender)
+  )
+    (asserts! (is-member caller) ERR-NOT-MEMBER)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    
+    (match (map-get? members caller)
+      member-data 
+      (let (
+        (current-stake (get stake member-data))
+      )
+        (asserts! (>= current-stake amount) ERR-INSUFFICIENT-FUNDS)
+        (try! (as-contract (stx-transfer? amount tx-sender caller)))
+        
+        (let (
+          (new-stake (- current-stake amount))
+          (updated-data (merge member-data {
+            stake: new-stake, 
+            last-interaction: stacks-block-height
+          }))
+        )
+          (map-set members caller updated-data)
+          (var-set treasury-balance (- (var-get treasury-balance) amount))
+          (ok new-stake)
+        )
+      )
+      ERR-NOT-MEMBER
+    )
+  )
+)
+
+;; PROPOSAL MANAGEMENT
+
+;; Create a new governance proposal
+(define-public (create-proposal (title (string-ascii 50)) (description (string-utf8 500)) (amount uint))
+  (let (
+    (caller tx-sender)
+    (proposal-id (+ (var-get total-proposals) u1))
+  )
+    (asserts! (is-member caller) ERR-NOT-MEMBER)
+    (asserts! (>= (var-get treasury-balance) amount) ERR-INSUFFICIENT-FUNDS)
+    (asserts! (> (len title) u0) ERR-INVALID-PROPOSAL)
+    (asserts! (> (len description) u0) ERR-INVALID-PROPOSAL)
+    
+    (map-set proposals proposal-id {
+      creator: caller,
+      title: title,
+      description: description,
+      amount: amount,
+      yes-votes: u0,
+      no-votes: u0,
+      status: "active",
+      created-at: stacks-block-height,
+      expires-at: (+ stacks-block-height u1440) ;; 10-day voting period
+    })
+    
+    (var-set total-proposals proposal-id)
+    (try! (update-member-reputation caller 1))
+    (ok proposal-id)
+  )
+)
+
+;; Cast a weighted vote on an active proposal
+(define-public (vote-on-proposal (proposal-id uint) (vote bool))
+  (let (
+    (caller tx-sender)
+  )
+    (asserts! (is-member caller) ERR-NOT-MEMBER)
+    (asserts! (is-active-proposal proposal-id) ERR-INVALID-PROPOSAL)
+    (asserts! (not (default-to false (map-get? votes {proposal-id: proposal-id, voter: caller}))) ERR-ALREADY-VOTED)
+    
+    (let (
+      (voting-power (calculate-voting-power caller))
+      (proposal (unwrap! (map-get? proposals proposal-id) ERR-INVALID-PROPOSAL))
+    )
+      (if vote
+        (map-set proposals proposal-id (merge proposal {
+          yes-votes: (+ (get yes-votes proposal) voting-power)
+        }))
+        (map-set proposals proposal-id (merge proposal {
+          no-votes: (+ (get no-votes proposal) voting-power)
+        }))
+      )
+      
+      (map-set votes {proposal-id: proposal-id, voter: caller} true)
+      (try! (update-member-reputation caller 1))
+      (ok true)
+    )
+  )
+)
